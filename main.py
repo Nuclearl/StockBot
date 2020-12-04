@@ -24,8 +24,9 @@ btn = {'buy': "Купить💲", 'registration': "Регистрация✒", '
        "time": "Время", "end_set_channel": "Завершить редактирование📌", "morning": "Утро", "day": "День",
        "evening": "Вечер", "night": "Ночь", "dagger": "❌", "tick": "✅"}
 
-btn_admin = {'panel_administrator': 'Панель администратора 👨‍💻',
-             'panel_custom': 'Панель пользователя 👨‍🦰'}
+btn_admin = {"panel_administrator": 'Панель администратора 👨‍💻',
+             "panel_custom": 'Панель пользователя 👨‍🦰', "list_of_registered": "Список зарегистрированных📄",
+             "post_payment": "Выставить оплату⚖"}
 
 
 # state
@@ -86,6 +87,12 @@ def action_time_keyboard():
     return keyboard
 
 
+def admin_keyboard():
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(KeyboardButton(btn_admin["list_of_registered"]), KeyboardButton(btn_admin["post_payment"]))
+    return keyboard
+
+
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     dbconfig = read_db_config()
@@ -109,6 +116,46 @@ async def start(message: types.Message):
     c.close()
 
 
+@dp.message_handler(lambda message: message.text in list(
+    btn_admin.values()) and message.from_user.id == message.chat.id and message.from_user.id == admin)
+async def take_massage_admin(message: types.Message):
+    user_id = message.from_user.id
+    if message.text == btn_admin["panel_custom"]:
+        await bot.send_message(user_id, btn_admin["panel_custom"],
+                               reply_markup=main_menu(user_id))
+    elif message.text == btn_admin["panel_administrator"]:
+        await bot.send_message(user_id, btn_admin["panel_administrator"],
+                               reply_markup=admin_keyboard())
+    elif message.text == btn_admin["list_of_registered"]:
+        dbconfig = read_db_config()
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        c.execute("SELECT DISTINCT user_id FROM channel")
+        all_user = c.fetchall()
+        all_user = [int(i[0]) for i in all_user]
+        count = 1
+        text = ""
+        for user in all_user:
+            print(await bot.get_chat(user))
+            c.execute("SELECT DISTINCT url, date FROM channel WHERE user_id = (%s)", (user,))
+            url_list = c.fetchall()
+            data_user = await bot.get_chat(user)
+            name = f"{data_user.first_name + ' ' + data_user.last_name}"
+            text += f"{count}. {'@' + data_user.username if data_user.username else str(data_user.id) + f' [{name}]'}\n"
+            for url in url_list:
+                text += f' {url[0]}  ->{url[1].strftime("%H:%M %d-%m-%y")}\n'
+            if count % 5 == 0:
+                await bot.send_message(admin, text)
+                text = ""
+            count += 1
+        await bot.send_message(admin, text)
+
+        conn.commit()
+        c.close()
+    elif message.text == btn_admin["post_payment"]:
+        await bot.send_message(user_id, "Вышлите @username или id, и сумму оплаты\n\n@username123 800\n123456789 800", parse_mode="HTML")
+
+
 @dp.message_handler(
     lambda message: message.text in list(btn.values()) and message.from_user.id == message.chat.id)
 async def take_massage(message: types.Message, state: FSMContext):
@@ -121,7 +168,7 @@ async def take_massage(message: types.Message, state: FSMContext):
     conn.commit()
     c.close()
     if int(possibility) == 0:
-        username = f"@{message.from_user.username}"
+        username = f"{'@' + message.from_user.username if message.from_user.username else message.from_user.first_name}"
         if message.text == btn['registration']:
             await bot.send_message(user_id,
                                    f"Приветствую {username}, что бы закрепить за вами права на канал <b>вышлите</b> его ссылку, после проверки того что вы являетесь Владельцем канала - Канал попадет на Биржу покупки.",
@@ -180,8 +227,10 @@ async def process_callback_messages(callback_query: types.CallbackQuery, state: 
                     c.execute("INSERT INTO channel (url, user_id) VALUES (%s, %s)", (pool_data[1], pool_data[2]))
                 c.execute("DELETE FROM pool WHERE id = (%s)", (int(two_param),))
                 try:
+                    user_data = await bot.get_chat(int(pool_data[2]))
                     await bot.edit_message_text(
-                        f"@{(await bot.get_chat(int(pool_data[2]))).username}\n{pool_data[1]}\nПодтверждено✅", user_id,
+                        f"{'@' + user_data.username if user_data.username else user_data.first_name + ' ' + user_data.last_name if user_data.last_name else user_data.first_name}\n{pool_data[1]}\nПодтверждено✅",
+                        user_id,
                         message_id)
                 except:
                     await bot.delete_message(user_id, message_id)
@@ -193,10 +242,10 @@ async def process_callback_messages(callback_query: types.CallbackQuery, state: 
                 pool_data = c.fetchone()
                 c.execute("DELETE FROM pool WHERE id = (%s)", (int(two_param),))
                 try:
+                    user_data = await bot.get_chat(int(pool_data[2]))
                     await bot.edit_message_text(
-                        # f"@{(await bot.get_chat(int(pool_data[2]))).username}\n{pool_data[1]}\Отклонено❌", user_id,
-                        # message_id)
-                        f"@{(await bot.get_chat(int(pool_data[2]))).username}\nОтклонено❌", user_id,
+                        f"{'@' + user_data.username if user_data.username else user_data.first_name + ' ' + user_data.last_name if user_data.last_name else user_data.first_name}\n{pool_data[1]}\nОтклонено❌",
+                        user_id,
                         message_id)
                 except:
                     await bot.delete_message(user_id, message_id)
@@ -240,7 +289,7 @@ async def get_registration_url(message: types.Message, state: FSMContext):
                 id = int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
                 c.execute("INSERT INTO pool (id, url, user_id) VALUES (%s, %s, %s)",
                           (id, text, user_id))
-                username = f"@{message.from_user.username}"
+                username = f"{'@' + message.from_user.username if message.from_user.username else message.from_user.first_name + ' ' + message.from_user.last_name if message.from_user.last_name else message.from_user.first_name}"
                 keyboard = InlineKeyboardMarkup().row(
                     InlineKeyboardButton("Подтвердить✅", callback_data=f"confirm_pool_{str(id)}"),
                     InlineKeyboardButton("Отклонить❌", callback_data=f"unconfirm_pool_{str(id)}"))
