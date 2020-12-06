@@ -1,6 +1,9 @@
 config.ini
 config.py
 test.py
+ghostdriver.log
+geckodriver.log
+geckodriver.exe
 venv/
 .idea/
 __pycache__/

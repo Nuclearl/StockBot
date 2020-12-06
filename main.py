@@ -11,6 +11,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import asyncio
+import parse_telemetr
 from concurrent.futures import ProcessPoolExecutor
 
 # Configure logging
@@ -23,11 +24,22 @@ btn = {'buy': "Купить💲", 'registration': "Регистрация✒", '
        "add_channel": "Добавить еще канал➕", "set_channel": "Настройка каналов⚙", "coverage": "Охват", "price": "Цена",
        "time": "Время", "end_set_channel": "Завершить редактирование📌", "morning": "Утро", "day": "День",
        "evening": "Вечер", "night": "Ночь", "dagger": "❌", "tick": "✅", "search_channel": "Найти каналы🔍",
-       "end_shopping": "Завершить покупку📌", "any": "Любое", "end_connection": "Завершить разговор"}
+       "end_shopping": "Завершить покупку📌", "any": "Любое", "end_connection": "Завершить разговор"
+       }
 
 btn_admin = {"panel_administrator": 'Панель администратора 👨‍💻',
              "panel_custom": 'Панель пользователя 👨‍🦰', "list_of_registered": "Список зарегистрированных📄",
-             "post_payment": "Выставить оплату⚖"}
+             "post_payment": "Выставить оплату⚖", "statistics": 'Статистика📊'}
+
+back_btn = '⬅️Назад'
+main_back_btn = 'Вернуться в основное меню'
+mail_but = "Рассылка"
+backMail_but = 'Назад ◀️'
+preMail_but = 'Предпросмотр 👁'
+startMail_but = 'Старт 🏁'
+textMail_but = 'Текст 📝'
+butMail_but = 'Ссылка-кнопка ⏺'
+photoMail_but = 'Фото 📸'
 
 
 # state
@@ -57,6 +69,30 @@ class PostPayment(StatesGroup):
 
 class Connection(StatesGroup):
     msg = State()
+
+
+class MailingStates(StatesGroup):
+    admin_mailing = State()
+
+
+class ProcessTextMailing(StatesGroup):
+    text = State()
+
+
+class ProcessEditTextBut(StatesGroup):
+    text = State()
+
+
+class ProcessEditUrlBut(StatesGroup):
+    text = State()
+
+
+class WaitPhoto(StatesGroup):
+    text = State()
+
+
+class CheckerState(StatesGroup):
+    check = State()
 
 
 # оплата
@@ -249,6 +285,49 @@ def search_paid_request(sum_paid, type_bank):
     return request
 
 
+async def mailing(user_ids, lively, banned, deleted, chat_id, mail_text, mail_photo, mail_link, mail_link_text):
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+    c = conn.cursor(buffered=True)
+    users_block = []
+    start_mail_time = time.time()
+    c.execute('''SELECT COUNT(*) FROM users''')
+    allusers = int(c.fetchone()[0])
+    for user_id in user_ids:
+        try:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.add(InlineKeyboardButton(text=mail_link_text, url=mail_link))
+            if str(mail_photo) != '0':
+                if str(mail_link_text) != '0':
+                    await bot.send_photo(user_id, caption=mail_text, photo=mail_photo, parse_mode='HTML',
+                                         reply_markup=keyboard)
+                else:
+                    await bot.send_photo(user_id, caption=mail_text, parse_mode='HTML', photo=mail_photo)
+            else:
+                if str(mail_link_text) not in '0':
+                    await bot.send_message(user_id, text=mail_text, parse_mode='HTML',
+                                           reply_markup=keyboard)
+                else:
+                    await bot.send_message(user_id, parse_mode='HTML', text=mail_text)
+            lively += 1
+        except Exception as e:
+            if 'bot was blocked by the user' in str(e):
+                users_block.append(user_id)
+                banned += 1
+                # database is locked
+    for user_id in users_block:
+        c.execute("UPDATE users SET lively = (%s) WHERE user_id = (%s)", ('block', user_id,))
+    admin_text = '*Рассылка окончена! ✅\n\n' \
+                 '🙂 Количество живых пользователей:* {0}\n' \
+                 '*% от числа всех:* {1}%\n' \
+                 '*💩 Количество заблокировавших:* {3}\n' \
+                 '*🕓 Время рассылки:* {2}'.format(str(lively), str(round(lively / allusers * 100, 2)),
+                                                   str(round(time.time() - start_mail_time, 2)) + ' сек', str(banned))
+    await bot.send_message(chat_id, admin_text, parse_mode='Markdown', reply_markup=admin_keyboard())
+    c.close()
+    conn.commit()
+
+
 # keyaboard
 def main_menu(user_id):
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton(btn['buy']),
@@ -302,8 +381,15 @@ def shopping_keyboard():
 def admin_keyboard():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(KeyboardButton(btn_admin["list_of_registered"]), KeyboardButton(btn_admin["post_payment"]))
+    keyboard.add(*[KeyboardButton(name) for name in [mail_but, btn_admin["statistics"]]])
     keyboard.row(btn_admin["panel_custom"])
     return keyboard
+
+
+mail_menu = ReplyKeyboardMarkup(resize_keyboard=True)
+mail_menu.add(*[KeyboardButton(name) for name in [textMail_but, photoMail_but]])
+mail_menu.add(*[KeyboardButton(name) for name in [butMail_but, preMail_but]])
+mail_menu.add(*[KeyboardButton(name) for name in [backMail_but, startMail_but]])
 
 
 @dp.message_handler(commands=['start'])
@@ -327,6 +413,122 @@ async def start(message: types.Message):
                                reply_markup=main_menu(user_id), parse_mode="HTML")
     conn.commit()
     c.close()
+
+
+@dp.message_handler(lambda m: m.text == mail_but and m.chat.id == admin and m.from_user.id == m.chat.id)
+async def cheker(message: types.Message):
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+
+    async def admin_mailing(message: types.Message):
+        chat_id = message.chat.id
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        msgtext = message.text
+        c.execute("""select textMail,photoMail,butTextMail,butUrlMail from users where user_id = %s""" % chat_id)
+        data = c.fetchone()
+        textMailUser = str(data[0])
+        photoMailUser = str(data[1])
+        butTextMail = str(data[2])
+        butUrlMail = str(data[3])
+        if msgtext == mail_but:
+            await bot.send_message(chat_id, '*Вы попали в меню рассылки *📢\n\n'
+                                            'Для возврата нажмите *{0}*\n\n'
+                                            'Для отмены какой-либо операции нажмите /start\n\n'
+                                            'Используйте *{1}* для предварительного просмотра рассылки, а *{2}* для начала'
+                                            ' рассылки\n\n'
+                                            'Текст рассылки поддерживает разметку *HTML*, то есть:\n'
+                                            '<b>*Жирный*</b>\n'
+                                            '<i>_Курсив_</i>\n'
+                                            '<pre>`Моноширный`</pre>\n'
+                                            '<a href="ссылка-на-сайт">[Обернуть текст в ссылку](test.ru)</a>'.format(
+                backMail_but, preMail_but, startMail_but
+            ),
+                                   parse_mode="markdown", reply_markup=mail_menu)
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == backMail_but:
+            await bot.send_message(chat_id, backMail_but, reply_markup=admin_keyboard())
+            # bot.clear_step_handler(message)
+
+        elif msgtext == preMail_but:
+            try:
+                if butTextMail == '0' and butUrlMail == '0':
+                    if photoMailUser == '0':
+                        await bot.send_message(chat_id, textMailUser, parse_mode='html', reply_markup=mail_menu)
+                    else:
+                        await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                             reply_markup=mail_menu)
+                else:
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(InlineKeyboardButton(text=butTextMail, url=butUrlMail))
+                    if photoMailUser == '0':
+                        await bot.send_message(chat_id, textMailUser, parse_mode='html',
+                                               reply_markup=keyboard)
+                    else:
+                        await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                             reply_markup=keyboard)
+            except:
+                await bot.send_message(chat_id, "Упс..проверьте правильность введения данных")
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == startMail_but:
+            c.execute(
+                """update users set textMail = 0, photoMail = 0,butTextMail = 0,butUrlMail = 0  where user_id = %s""" % chat_id)
+
+            user_ids = []
+            c.execute("""select user_id from users""")
+            user_id = c.fetchone()
+            while user_id is not None:
+                user_ids.append(user_id[0])
+                user_id = c.fetchone()
+            c.close()
+            mail_thread = threading.Thread(target=mailing, args=(
+                user_ids, 0, 0, 0, chat_id, textMailUser, photoMailUser, butUrlMail, butTextMail))
+            mail_thread.start()
+            await bot.send_message(chat_id, 'Рассылка началась!',
+                                   reply_markup=admin_keyboard())
+
+        elif textMail_but == msgtext:
+            await bot.send_message(chat_id,
+                                   'Введите текст рассылки. Допускаются теги HTML. Для отмены ввода нажите /start',
+                                   reply_markup=mail_menu)
+            await ProcessTextMailing.text.set()
+
+        elif photoMail_but == msgtext:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(InlineKeyboardButton(text='Добавить фото 📝', callback_data='editPhotoMail'))
+            keyboard.row(InlineKeyboardButton(text='Удалить фото ❌', callback_data='deletePhoto'))
+            await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+            await MailingStates.admin_mailing.set()
+
+        elif butMail_but == msgtext:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(InlineKeyboardButton(text='Изменить текст кнопки 📝', callback_data='editTextBut'))
+            keyboard.row(InlineKeyboardButton(text='Изменить ссылку кнопки 🔗', callback_data='editUrlBut'))
+            keyboard.row(InlineKeyboardButton(text='Убрать всё к чертям 🙅‍♂', callback_data='deleteBut'))
+            await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == "/start":
+            # bot.clear_step_handler(message)
+            await start(message)
+
+        else:
+            # bot.clear_step_handler(message)
+            await MailingStates.admin_mailing.set()
+
+    user_id = message.chat.id
+    c = conn.cursor(buffered=True)
+    c.execute("select * from users where user_id = %s" % user_id)
+    point = c.fetchone()
+    if point is None:
+        c.execute("insert into users (user_id, state) values (%s, %s)",
+                  (user_id, 0))
+        conn.commit()
+    c.close()
+    # bot.clear_step_handler(message)
+    await admin_mailing(message)
 
 
 @dp.message_handler(lambda message: message.text in list(
@@ -361,7 +563,14 @@ async def take_massage_admin(message: types.Message):
                 await bot.send_message(admin, text)
                 text = ""
             count += 1
-        await bot.send_message(admin, text)
+        limit = 1
+        while True:
+            if len(text) > (4096 * limit):
+                await bot.send_message(admin, text[(limit - 1) * 4096:(4096 * limit)])
+                limit += 1
+            else:
+                await bot.send_message(admin, text[(limit - 1) * 4096:(4096 * limit)])
+                break
 
         conn.commit()
         c.close()
@@ -370,6 +579,22 @@ async def take_massage_admin(message: types.Message):
                                "Вышлите @username или id, и сумму оплаты\n\n<b>Пример:</b>\n<i>@username123 800\n123456789 800</i>",
                                parse_mode="HTML")
         await PostPayment.data.set()
+    elif message.text == btn_admin["statistics"]:
+        dbconfig = read_db_config()
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        c.execute('''SELECT COUNT(*) FROM users''')
+        allusers = int(c.fetchone()[0])
+        c.execute('''SELECT COUNT(*) FROM users WHERE lively = 1''')
+        banned = int(c.fetchone()[0])
+        c.close()
+        conn.commit()
+        lively = allusers - banned
+        admin_text = '*🙂 Количество живых пользователей:* {0}\n' \
+                     '*% от числа всех:* {1}%\n' \
+                     '*💩 Количество заблокировавших:* {2}'.format(str(lively), str(round(lively / allusers * 100, 2)),
+                                                                   str(banned))
+        await bot.send_message(user_id, admin_text, parse_mode='Markdown', reply_markup=admin_keyboard())
 
 
 @dp.message_handler(
@@ -381,17 +606,16 @@ async def take_massage(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
+
     if int(possibility) == 0:
         username = f"{'@' + message.from_user.username if message.from_user.username else message.from_user.first_name}"
         if message.text == btn['registration']:
             await bot.send_message(user_id,
-                                   f"Приветствую {username}, что бы закрепить за вами права на канал <b>вышлите</b> его ссылку, после проверки того что вы являетесь Владельцем канала - Канал попадет на Биржу покупки.",
+                                   f"Приветствую {username}, что бы закрепить за вами права на канал <b>вышлите</b> его ссылку или username, после проверки того что вы являетесь Владельцем канала - Канал попадет на Биржу покупки.",
                                    parse_mode="HTML", reply_markup=registration_keyboard())
             await Registration.url.set()
         elif message.text == btn['add_channel']:
-            await bot.send_message(user_id, "Вышлите ссылку на канал")
+            await bot.send_message(user_id, "Вышлите ссылку на канал или username")
             await Registration.url.set()
         elif message.text == btn['end_registration']:
             data = await state.get_data()
@@ -403,12 +627,23 @@ async def take_massage(message: types.Message, state: FSMContext):
                                        reply_markup=main_menu(user_id))
             await state.finish()
         elif message.text == btn['set_channel']:
-            await bot.send_message(user_id, "Вышлите ссылку на канал, который хотите редактировать")
+            keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+            c.execute("SELECT DISTINCT url FROM channel WHERE user_id = %s", (user_id,))
+            all_url = c.fetchall()
+            if all_url:
+                for url in all_url:
+                    keyboard.row(KeyboardButton(url[0]))
+                await bot.send_message(user_id, "Вышлите ссылку на канал, который хотите редактировать",reply_markup=keyboard)
+            else:
+                await bot.send_message(user_id, "Вышлите ссылку на канал, который хотите редактировать")
             await SetChannel.url.set()
         elif message.text == btn['buy']:
+
             await bot.send_message(user_id, "Раздел покупки",
                                    reply_markup=shopping_keyboard())
             await Shopping.choice.set()
+    conn.commit()
+    c.close()
 
 
 @dp.callback_query_handler(state="*")
@@ -422,8 +657,7 @@ async def process_callback_messages(callback_query: types.CallbackQuery, state: 
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
+
     if int(possibility) == 0:
         try:
             message_id = callback_query.message.message_id
@@ -480,6 +714,39 @@ async def process_callback_messages(callback_query: types.CallbackQuery, state: 
             await bot.send_message(user_id, "Введите свой @username и сообщение")
             await state.update_data(recipient_id=recipient_id)
             await Connection.msg.set()
+        elif 'editTextBut' == start_data:
+            # bot.clear_step_handler(callback_query.message)
+            await bot.send_message(user_id, "Введите текст для кнопки")
+            # bot.register_next_step_handler(callback_query.message, process_editTextBut)
+            await ProcessEditTextBut.text.set()
+
+        elif 'editUrlBut' == start_data:
+            # bot.clear_step_handler(callback_query.message)
+            await bot.send_message(user_id, 'Введите ссылку 📝', reply_markup=mail_menu)
+            await ProcessEditUrlBut.text.set()
+
+        elif 'deleteBut' == start_data:
+            c = conn.cursor(buffered=True)
+            c.execute("""update users set butUrlMail = 0, butTextMail = 0 where user_id = (%s)""", (user_id,))
+            conn.commit()
+            c.close()
+            await bot.send_message(user_id, 'Удалено! 🗑', reply_markup=mail_menu)
+            await cheker(callback_query.message)
+
+        elif 'editPhotoMail' == start_data:
+
+            # bot.clear_step_handler(callback_query.message)
+            await bot.send_message(user_id, 'Отправьте фотографию', reply_markup=mail_menu)
+            await WaitPhoto.text.set()
+
+        elif 'deletePhoto' == start_data:
+            c = conn.cursor(buffered=True)
+            c.execute("""update users set photoMail = 0 where user_id = (%s)""", (user_id,))
+            conn.commit()
+            c.close()
+            await bot.send_message(user_id, 'Фото удалено! ✅', reply_markup=mail_menu)
+            await cheker(callback_query.message)
+
         await bot.answer_callback_query(query_id)
         conn.commit()
         c.close()
@@ -494,8 +761,6 @@ async def get_registration_url(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
     if int(possibility) == 0:
         if text == btn['end_registration']:
             data = await state.get_data()
@@ -507,13 +772,17 @@ async def get_registration_url(message: types.Message, state: FSMContext):
                                        reply_markup=main_menu(user_id))
             await state.finish()
         elif text == btn['add_channel']:
-            await bot.send_message(user_id, "Вышлите ссылку на канал")
+            await bot.send_message(user_id, "Вышлите ссылку на канал или username")
             await Registration.url.set()
         elif text == '/start':
             await state.finish()
             await start(message)
         else:
-            if text[0:13] == "https://t.me/":
+            if re.match("^@\w+$", text) or re.match("^t\.me/\w+$", text) or re.match("^https://t\.me/\w+$", text):
+                if re.match("^@\w+$", text):
+                    text = text.replace("@", "https://t.me/")
+                if re.match("^t\.me/\w+$", text):
+                    text = text.replace("t.me/", "https://t.me/")
                 dbconfig = read_db_config()
                 conn = MySQLConnection(**dbconfig)
                 c = conn.cursor(buffered=True)
@@ -521,7 +790,7 @@ async def get_registration_url(message: types.Message, state: FSMContext):
                 all_url = c.fetchall()
                 all_url = [i[0] for i in all_url]
                 if text in all_url:
-                    await bot.send_message(user_id, "Такой канал уже есть на бирже. Вышлите новою ссылку на канал")
+                    await bot.send_message(user_id, "Такой канал уже есть на бирже. Вышлите новою ссылку на канал или username")
                     await Registration.url.set()
                 else:
                     id = int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
@@ -537,7 +806,7 @@ async def get_registration_url(message: types.Message, state: FSMContext):
                 conn.commit()
                 c.close()
             else:
-                await bot.send_message(user_id, "Вышлите ссылку на канал")
+                await bot.send_message(user_id, "Вышлите ссылку на канал или username")
                 await Registration.url.set()
 
 
@@ -550,13 +819,13 @@ async def get_set_url(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
+    username = f"{'@' + message.from_user.username if message.from_user.username else message.from_user.first_name}"
     if int(possibility) == 0:
         if text == '/start':
             await state.finish()
             await start(message)
-        elif text[0:13] == "https://t.me/":
+        elif re.match("^https://t\.me/\w+$", text):
+
             dbconfig = read_db_config()
             conn = MySQLConnection(**dbconfig)
             c = conn.cursor(buffered=True)
@@ -619,8 +888,6 @@ async def get_set_coverage(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
     if int(possibility) == 0:
         if text == '/start':
             await state.finish()
@@ -716,8 +983,6 @@ async def get_set_time1(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
     if int(possibility) == 0:
         if text == '/start':
             await state.finish()
@@ -749,8 +1014,6 @@ async def get_set_time2(message: types.Message, state: FSMContext):
     c = conn.cursor(buffered=True)
     c.execute("select possibility from users where user_id = %s", (user_id,))
     possibility = c.fetchone()[0]
-    conn.commit()
-    c.close()
     if int(possibility) == 0:
         if text == '/start':
             await state.finish()
@@ -878,6 +1141,7 @@ async def get_shopping_time(message: types.Message, state: FSMContext):
             await state.finish()
             await start(message)
         elif text == btn["search_channel"]:
+
             await bot.send_message(user_id, "Выберите желамое время размещения вашего поста",
                                    reply_markup=time_keyboard().row(KeyboardButton(btn["any"])))
             await Shopping.time.set()
@@ -1021,8 +1285,16 @@ async def get_shopping_parameters(message: types.Message, state: FSMContext):
                     msg_text += f"\nОхват: {item[3]}-{item[4]}"
                     msg_text += f"\nЦена: {item[5]}"
                     count += 1
+                msg_text+="\n\nДля нового поиска введите запрос по диапазонам"
                 await state.update_data(dict=conformity)
-                await bot.send_message(user_id, msg_text)
+                limit = 1
+                while True:
+                    if len(msg_text) > (4096 * limit):
+                        await bot.send_message(user_id, msg_text[(limit - 1) * 4096:(4096 * limit)])
+                        limit += 1
+                    else:
+                        await bot.send_message(user_id, msg_text[(limit - 1) * 4096:(4096 * limit)])
+                        break
                 await Shopping.number.set()
             else:
                 await bot.send_message(user_id, "Совпадений не найдено")
@@ -1059,6 +1331,7 @@ async def get_shopping_number(message: types.Message, state: FSMContext):
                                    reply_markup=main_menu(user_id))
             await state.finish()
         elif re.match("^\d+$", text.replace(" ", "")):
+
             id = int(message.text)
             try:
                 sql_id = conformity[id]
@@ -1066,12 +1339,31 @@ async def get_shopping_number(message: types.Message, state: FSMContext):
                 await bot.send_message(user_id, "Выберете номер для подробной информации")
                 await Shopping.number.set()
             c.execute("SELECT url, user_id FROM channel WHERE id = %s", (sql_id,))
+
             data = c.fetchone()
+            msg_st = await bot.send_message(user_id, "Форимируем статистику...")
+            try:
+                url_image = parse_telemetr.get_image(data[0])
+            except Exception as e:
+                print(e)
+                try:
+                    url_image = parse_telemetr.get_image(data[0])
+                except:
+                    url_image = None
+            await bot.delete_message(user_id, msg_st.message_id)
             keyboard = InlineKeyboardMarkup().row(
                 InlineKeyboardButton("Связаться через бот", callback_data=f"connection_{data[1]}"))
             await bot.send_message(user_id, data[0], reply_markup=keyboard)
+
+            if url_image:
+                await bot.send_message(user_id, url_image)
             await state.finish()
             await Shopping.choice.set()
+        elif re.match("^Охват:\d+-\d+$", text.replace(" ", "")) or re.match("^Цена:\d+-\d+$",
+                                                                            text.replace(" ", "")) or re.match(
+            "^Охват:\d+-\d+Цена:\d+-\d+$", text.replace(" ", "")) or re.match("^Цена:\d+-\d+Охват:\d+-\d+$",
+                                                                              text.replace(" ", "")):
+            await get_shopping_parameters(message, state)
         else:
             await bot.send_message(user_id, "Выберете номер для подробной информации")
             await Shopping.number.set()
@@ -1105,14 +1397,320 @@ async def get_connection_msg(message: types.Message, state: FSMContext):
                                    reply_markup=main_menu(user_id))
             await state.finish()
         elif '@' in text:
+            keyboard = InlineKeyboardMarkup().row(
+                InlineKeyboardButton("Связаться через бот", callback_data=f"connection_{user_id}"))
             await bot.send_message(user_id, "Отправлено")
-            await bot.send_message(recipient_id, text)
+            await bot.send_message(recipient_id, text, reply_markup=keyboard)
             await state.finish()
             await Shopping.choice.set()
         else:
             await bot.send_message(user_id, "Введите свой @username и сообщение")
             await state.update_data(recipient_id=recipient_id)
             await Connection.msg.set()
+
+
+@dp.message_handler(state=MailingStates.admin_mailing)
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+    c = conn.cursor(buffered=True)
+    chat_id = message.chat.id
+    msgtext = message.text
+    c.execute("""select textMail,photoMail,butTextMail,butUrlMail from users where user_id = %s""" % chat_id)
+    data = c.fetchone()
+    textMailUser = str(data[0])
+    photoMailUser = str(data[1])
+    butTextMail = str(data[2])
+    butUrlMail = str(data[3])
+    if msgtext == mail_but:
+        await bot.send_message(chat_id, '*Вы попали в меню рассылки *📢\n\n'
+                                        'Для возврата нажмите *{0}*\n\n'
+                                        'Для отмены какой-либо операции нажмите /start\n\n'
+                                        'Используйте *{1}* для предварительного просмотра рассылки, а *{2}* для начала'
+                                        ' рассылки\n\n'
+                                        'Текст рассылки поддерживает разметку *HTML*, то есть:\n'
+                                        '<b>*Жирный*</b>\n'
+                                        '<i>_Курсив_</i>\n'
+                                        '<pre>`Моноширный`</pre>\n'
+                                        '<a href="ссылка-на-сайт">[Обернуть текст в ссылку](test.ru)</a>'.format(
+            backMail_but, preMail_but, startMail_but
+        ),
+                               parse_mode="markdown", reply_markup=mail_menu)
+        await MailingStates.admin_mailing.set()
+
+    elif msgtext == backMail_but:
+        await bot.send_message(chat_id, backMail_but, reply_markup=admin_keyboard())
+        # bot.clear_step_handler(message)
+
+    elif msgtext == preMail_but:
+        try:
+            if butTextMail == '0' and butUrlMail == '0':
+                if photoMailUser == '0':
+                    await bot.send_message(chat_id, textMailUser, parse_mode='html', reply_markup=mail_menu)
+                else:
+                    await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                         reply_markup=mail_menu)
+            else:
+                keyboard = InlineKeyboardMarkup()
+                keyboard.add(InlineKeyboardButton(text=butTextMail, url=butUrlMail))
+                if photoMailUser == '0':
+                    await bot.send_message(chat_id, textMailUser, parse_mode='html',
+                                           reply_markup=keyboard)
+                else:
+                    await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                         reply_markup=keyboard)
+        except:
+            await bot.send_message(chat_id, "Упс..проверьте правильность введения данных")
+        await MailingStates.admin_mailing.set()
+
+    elif msgtext == startMail_but:
+        c.execute(
+            """update users set textMail = 0, photoMail = 0,butTextMail = 0,butUrlMail = 0  where user_id = %s""" % chat_id)
+        user_ids = []
+        c.execute("""select user_id from users""")
+        user_id = c.fetchone()
+        while user_id is not None:
+            user_ids.append(user_id[0])
+            user_id = c.fetchone()
+        c.close()
+        """
+        mail_thread = threading.Thread(target=mailing, args=(
+            user_ids, 0, 0, 0, chat_id, textMailUser, photoMailUser, butUrlMail, butTextMail))
+        mail_thread.start()
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(
+                mailing(user_ids, 0, 0, 0, chat_id, textMailUser, photoMailUser, butUrlMail, butTextMail))
+            await bot.send_message(chat_id, 'Рассылка началась!',
+                                   reply_markup=admin_keyboard())
+        except:
+            pass
+    elif textMail_but == msgtext:
+        await bot.send_message(chat_id,
+                               'Введите текст рассылки. Допускаются теги HTML. Для отмены ввода нажите /start',
+                               reply_markup=mail_menu)
+        await ProcessTextMailing.text.set()
+
+    elif photoMail_but == msgtext:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.row(InlineKeyboardButton(text='Добавить фото 📝', callback_data='editPhotoMail'))
+        keyboard.row(InlineKeyboardButton(text='Удалить фото ❌', callback_data='deletePhoto'))
+        await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+        await MailingStates.admin_mailing.set()
+
+    elif butMail_but == msgtext:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.row(InlineKeyboardButton(text='Изменить текст кнопки 📝', callback_data='editTextBut'))
+        keyboard.row(InlineKeyboardButton(text='Изменить ссылку кнопки 🔗', callback_data='editUrlBut'))
+        keyboard.row(InlineKeyboardButton(text='Убрать всё к чертям 🙅‍♂', callback_data='deleteBut'))
+        await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+        await MailingStates.admin_mailing.set()
+
+    elif msgtext == "/start":
+        # bot.clear_step_handler(message)
+        await state.finish()
+        await start(message)
+    else:
+        # bot.clear_step_handler(message)
+        await MailingStates.admin_mailing.set()
+
+
+@dp.message_handler(state=ProcessTextMailing.text)
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+    chat_id = message.from_user.id
+    if message.text:
+        if message.text == "/start":
+            await bot.send_message(chat_id, "Действие отменено")
+        else:
+            c = conn.cursor(buffered=True)
+            c.execute("update users set textMail = (%s) where user_id = (%s)", (message.text,
+                                                                                chat_id))
+            conn.commit()
+            c.close()
+            await bot.send_message(chat_id, "Текст успешно установлен")
+            await state.finish()
+        await MailingStates.admin_mailing.set()
+
+
+@dp.message_handler(state=ProcessEditTextBut.text)
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    chat_id = message.from_user.id
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+    c = conn.cursor(buffered=True)
+    # c.execute("""update users set state = 0 where user_id = %s""" % (chat_id))
+    c.execute("update users set butTextMail = (%s) where user_id = (%s)", (message.text,
+                                                                           chat_id))
+    conn.commit()
+    c.close()
+    await bot.send_message(chat_id, 'Текст кнопки обновлен! ✅', reply_markup=mail_menu)
+    await state.finish()
+
+
+@dp.message_handler(state=ProcessEditUrlBut.text)
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    if message.text:
+        chat_id = message.from_user.id
+        dbconfig = read_db_config()
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        c.execute("update users set butUrlMail = (%s) where user_id = (%s)", (message.text,
+                                                                              chat_id))
+        conn.commit()
+        c.close()
+        await bot.send_message(chat_id, 'Ссылка кнопки обновлена! ✅', reply_markup=mail_menu)
+        await state.finish()
+        await cheker(message)
+
+
+@dp.message_handler(state=CheckerState.check)
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    dbconfig = read_db_config()
+    conn = MySQLConnection(**dbconfig)
+
+    async def admin_mailing(message: types.Message):
+        chat_id = message.chat.id
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        msgtext = message.text
+        c.execute("""select textMail,photoMail,butTextMail,butUrlMail from users where user_id = %s""" % chat_id)
+        data = c.fetchone()
+        textMailUser = str(data[0])
+        photoMailUser = str(data[1])
+        butTextMail = str(data[2])
+        butUrlMail = str(data[3])
+        if msgtext == mail_but:
+            await bot.send_message(chat_id, '*Вы попали в меню рассылки *📢\n\n'
+                                            'Для возврата нажмите *{0}*\n\n'
+                                            'Для отмены какой-либо операции нажмите /start\n\n'
+                                            'Используйте *{1}* для предварительного просмотра рассылки, а *{2}* для начала'
+                                            ' рассылки\n\n'
+                                            'Текст рассылки поддерживает разметку *HTML*, то есть:\n'
+                                            '<b>*Жирный*</b>\n'
+                                            '<i>_Курсив_</i>\n'
+                                            '<pre>`Моноширный`</pre>\n'
+                                            '<a href="ссылка-на-сайт">[Обернуть текст в ссылку](test.ru)</a>'.format(
+                backMail_but, preMail_but, startMail_but
+            ),
+                                   parse_mode="markdown", reply_markup=mail_menu)
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == backMail_but:
+            await bot.send_message(chat_id, backMail_but, reply_markup=admin_keyboard())
+            # bot.clear_step_handler(message)
+
+        elif msgtext == preMail_but:
+            try:
+                if butTextMail == '0' and butUrlMail == '0':
+                    if photoMailUser == '0':
+                        await bot.send_message(chat_id, textMailUser, parse_mode='html', reply_markup=mail_menu)
+                    else:
+                        await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                             reply_markup=mail_menu)
+                else:
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(InlineKeyboardButton(text=butTextMail, url=butUrlMail))
+                    if photoMailUser == '0':
+                        await bot.send_message(chat_id, textMailUser, parse_mode='html',
+                                               reply_markup=keyboard)
+                    else:
+                        await bot.send_photo(chat_id, caption=textMailUser, photo=photoMailUser, parse_mode='html',
+                                             reply_markup=keyboard)
+            except:
+                await bot.send_message(chat_id, "Упс..проверьте правильность введения данных")
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == startMail_but:
+            c.execute(
+                """update users set textMail = 0, photoMail = 0,butTextMail = 0,butUrlMail = 0  where user_id = %s""" % chat_id)
+            user_ids = []
+            c.execute("""select user_id from users""")
+            user_id = c.fetchone()
+            while user_id is not None:
+                user_ids.append(user_id[0])
+                user_id = c.fetchone()
+            c.close()
+            """
+            mail_thread = threading.Thread(target=mailing, args=(
+                user_ids, 0, 0, 0, chat_id, textMailUser, photoMailUser, butUrlMail, butTextMail))
+            mail_thread.start()
+            """
+            try:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(
+                    mailing(user_ids, 0, 0, 0, chat_id, textMailUser, photoMailUser, butUrlMail, butTextMail))
+                await bot.send_message(chat_id, 'Рассылка началась!',
+                                       reply_markup=admin_keyboard())
+            except:
+                pass
+
+        elif textMail_but == msgtext:
+            await bot.send_message(chat_id,
+                                   'Введите текст рассылки. Допускаются теги HTML. Для отмены ввода нажите /start',
+                                   reply_markup=mail_menu)
+            await ProcessTextMailing.text.set()
+
+        elif photoMail_but == msgtext:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(InlineKeyboardButton(text='Добавить фото 📝', callback_data='editPhotoMail'))
+            keyboard.row(InlineKeyboardButton(text='Удалить фото ❌', callback_data='deletePhoto'))
+            await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+            await MailingStates.admin_mailing.set()
+
+        elif butMail_but == msgtext:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(InlineKeyboardButton(text='Изменить текст кнопки 📝', callback_data='editTextBut'))
+            keyboard.row(InlineKeyboardButton(text='Изменить ссылку кнопки 🔗', callback_data='editUrlBut'))
+            keyboard.row(InlineKeyboardButton(text='Убрать всё к чертям 🙅‍♂', callback_data='deleteBut'))
+            await bot.send_message(chat_id, 'Выберите действие ⤵', reply_markup=keyboard)
+            await MailingStates.admin_mailing.set()
+
+        elif msgtext == "/start":
+            # bot.clear_step_handler(message)
+            await start(message)
+
+        else:
+            # bot.clear_step_handler(message)
+            await MailingStates.admin_mailing.set()
+
+    user_id = message.chat.id
+    c = conn.cursor(buffered=True)
+    c.execute("select * from users where user_id = %s" % user_id)
+    point = c.fetchone()
+    if point is None:
+        c.execute("insert into users (user_id, state) values (%s, %s)",
+                  (user_id, 0))
+        conn.commit()
+    c.close()
+    # bot.clear_step_handler(message)
+    await state.finish()
+    await admin_mailing(message)
+
+
+@dp.message_handler(state=WaitPhoto.text, content_types=['photo'])
+async def get_telegram_id(message: types.Message, state: FSMContext):
+    print("photo")
+    chat_id = message.from_user.id
+    if message.content_type == 'photo':
+        dbconfig = read_db_config()
+        conn = MySQLConnection(**dbconfig)
+        c = conn.cursor(buffered=True)
+        # msgphoto = message.json['photo'][0]['file_id']
+        msgphoto = message.photo[0].file_id
+        c.execute("""update users set photoMail = (%s) where user_id = (%s)""", (msgphoto, chat_id,))
+        await bot.send_message(chat_id, 'Фото прикреплено! ✅', reply_markup=mail_menu)
+        conn.commit()
+        c.close()
+        # bot.register_next_step_handler(message, cheker)
+        await state.finish()
+        await CheckerState.check.set()
+    else:
+        await bot.send_message(chat_id, "Упс...", reply_markup=mail_menu)
+        await CheckerState.check.set()
+        # bot.register_next_step_handler(message, cheker)
 
 
 def repeat(coro, loop):
